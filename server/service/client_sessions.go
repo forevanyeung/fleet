@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/fleetdm/fleet/v4/server/fleet"
 )
@@ -67,6 +68,51 @@ func (c *Client) SSOSettings() (*fleet.SessionSSOSettings, error) {
 	}
 
 	return responseBody.Settings, nil
+}
+
+// FleetctlSSOURL returns the URL to open in the browser to log fleetctl in with
+// SSO. Once logged in, the browser is redirected to redirectURI with an
+// authorization code to pass to ExchangeFleetctlSSOCode.
+func (c *Client) FleetctlSSOURL(redirectURI, state, codeChallenge string) string {
+	q := url.Values{
+		"redirect_uri":          {redirectURI},
+		"state":                 {state},
+		"code_challenge":        {codeChallenge},
+		"code_challenge_method": {"S256"},
+	}
+	return c.URL("/api/v1/fleet/sso/fleetctl", q.Encode()).String()
+}
+
+// ExchangeFleetctlSSOCode redeems the authorization code received at the end of
+// an SSO login started with FleetctlSSOURL for a session token.
+func (c *Client) ExchangeFleetctlSSOCode(code, codeVerifier, redirectURI string) (*fleet.LoginResponse, error) {
+	params := map[string]string{
+		"code":          code,
+		"code_verifier": codeVerifier,
+		"redirect_uri":  redirectURI,
+	}
+	response, err := c.Do("POST", "/api/v1/fleet/sso/fleetctl/token", "", params)
+	if err != nil {
+		return nil, fmt.Errorf("POST /api/v1/fleet/sso/fleetctl/token: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"SSO login received status %d %s",
+			response.StatusCode,
+			extractServerErrorText(response.Body),
+		)
+	}
+
+	var responseBody fleet.LoginResponse
+	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
+		return nil, fmt.Errorf("decode SSO login response: %w", err)
+	}
+	if responseBody.Err != nil {
+		return nil, fmt.Errorf("SSO login: %w", responseBody.Err)
+	}
+	return &responseBody, nil
 }
 
 // Logout attempts to logout to the current Fleet instance.

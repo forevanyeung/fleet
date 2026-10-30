@@ -299,6 +299,22 @@ type Service interface {
 	GetSSOUser(ctx context.Context, auth Auth) (*User, error)
 	// LoginSSOUser logs-in the given SSO user
 	LoginSSOUser(ctx context.Context, user *User, redirectURL string) (*SSOSession, error)
+	// InitiateFleetctlSSO starts an SSO login on behalf of fleetctl login, which
+	// will receive an authorization code at its loopback redirectURI.
+	InitiateFleetctlSSO(ctx context.Context, redirectURI, state, codeChallenge string) (sessionID string, sessionDurationSeconds int, idpURL string, err error)
+	// FleetctlSSOCallback verifies the SAML response for an SSO login started by
+	// fleetctl login, and returns the login for the user to approve. It returns
+	// handled=false if the SSO session wasn't started by fleetctl. If the login
+	// failed, the browser must be sent to redirectURL so that fleetctl stops
+	// waiting.
+	FleetctlSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (consent *FleetctlSSOConsent, redirectURL string, handled bool, err error)
+	// ConfirmFleetctlSSO records the user's decision on a pending fleetctl SSO
+	// login, and returns where to send the browser: back to fleetctl with an
+	// authorization code if approved.
+	ConfirmFleetctlSSO(ctx context.Context, consentID string, approve bool) (redirectURL string, err error)
+	// ExchangeFleetctlSSOCode redeems an authorization code issued to fleetctl
+	// login for a new session.
+	ExchangeFleetctlSSOCode(ctx context.Context, code, codeVerifier, redirectURI string) (*User, *Session, error)
 
 	// SSOSettings returns non-sensitive single sign on information used before authentication
 	SSOSettings(ctx context.Context) (*SessionSSOSettings, error)

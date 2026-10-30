@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -25,6 +26,7 @@ import (
 	"github.com/fleetdm/fleet/v4/server/datastore/redis/redistest"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/ptr"
+	"github.com/fleetdm/fleet/v4/server/sso"
 	"github.com/fleetdm/fleet/v4/server/test"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
@@ -263,6 +265,136 @@ func (s *integrationSSOTestSuite) TestSSOLogin() {
 			}
 		}
 		return false
+	})
+}
+
+func (s *integrationSSOTestSuite) TestFleetctlSSOLogin() {
+	t := s.T()
+
+	acResp := appConfigResponse{}
+	s.DoJSON("PATCH", "/api/latest/fleet/config", json.RawMessage(fmt.Sprintf(`{
+		"server_settings": {"server_url": "https://localhost:8080"},
+		"sso_settings": {
+			"enable_sso": true,
+			"entity_id": "https://localhost:8080",
+			"idp_name": "SimpleSAML",
+			"metadata_url": "%s"
+		}
+	}`, testSAMLIDPMetadataURL)), http.StatusOK, &acResp)
+
+	var settings ssoSettingsResponse
+	s.DoJSON("GET", "/api/v1/fleet/sso", nil, http.StatusOK, &settings)
+	require.True(t, settings.Settings.FleetctlSSO)
+
+	// A user no other test in this suite logs in as.
+	s.Do("POST", "/api/latest/fleet/users/admin", fleet.UserPayload{
+		Name:       new("SSO User 6"),
+		Email:      new("sso_user_6_global_observer@example.com"),
+		GlobalRole: new(fleet.RoleObserver),
+		SSOEnabled: new(true),
+	}, http.StatusOK)
+
+	const redirectURI = "http://127.0.0.1:4321/callback"
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+
+	// startLogin plays the browser through the IdP, returning the consent ID
+	// from the consent page.
+	startLogin := func(client *http.Client) string {
+		res := s.doWithClient(client, "GET", "/api/v1/fleet/sso/fleetctl", nil, http.StatusSeeOther, nil,
+			"redirect_uri", redirectURI, "state", "the-state", "code_challenge", challenge, "code_challenge_method", "S256")
+		idpURL := res.Header.Get("Location")
+		require.NoError(t, res.Body.Close())
+
+		samlResponse := s.completeSAMLLogin(client, idpURL, "sso_user_6_global_observer", "user123#")
+		res = s.doWithClient(client, "POST", "/api/v1/fleet/sso/callback", nil, http.StatusOK, nil, "SAMLResponse", samlResponse)
+		body, err := io.ReadAll(res.Body)
+		require.NoError(t, err)
+		require.NoError(t, res.Body.Close())
+
+		page := string(body)
+		require.Contains(t, page, "sso_user_6_global_observer@example.com")
+		require.Contains(t, page, sso.FleetctlVerificationCode(challenge))
+		m := regexp.MustCompile(`name="consent_id" value="([^"]+)"`).FindStringSubmatch(page)
+		require.Len(t, m, 2)
+		return m[1]
+	}
+	confirm := func(client *http.Client, consentID, action string, wantStatus int) (*http.Response, string) {
+		res, err := client.PostForm(s.server.URL+"/api/v1/fleet/sso/fleetctl/consent", url.Values{
+			"consent_id": {consentID},
+			"action":     {action},
+		})
+		require.NoError(t, err)
+		body, err := io.ReadAll(res.Body)
+		require.NoError(t, err)
+		require.NoError(t, res.Body.Close())
+		require.Equal(t, wantStatus, res.StatusCode)
+		return res, string(body)
+	}
+
+	t.Run("approved", func(t *testing.T) {
+		client := s.newSSOTestClient()
+		consentID := startLogin(client)
+
+		res, _ := confirm(client, consentID, "approve", http.StatusSeeOther)
+		loc, err := url.Parse(res.Header.Get("Location"))
+		require.NoError(t, err)
+		require.Equal(t, "127.0.0.1:4321", loc.Host)
+		require.Equal(t, "the-state", loc.Query().Get("state"))
+		code := loc.Query().Get("code")
+		require.NotEmpty(t, code)
+
+		// The consent can't be used twice. Like the SSO callback, the error page
+		// is served with a 200.
+		_, page := confirm(client, consentID, "approve", http.StatusOK)
+		require.Contains(t, page, "expired or was already used")
+
+		// A wrong verifier fails, and burns the code.
+		s.DoRawNoAuth("POST", "/api/v1/fleet/sso/fleetctl/token", jsonMustMarshal(t, map[string]string{
+			"code": code, "code_verifier": verifier[1:] + "x", "redirect_uri": redirectURI,
+		}), http.StatusUnauthorized)
+		s.DoRawNoAuth("POST", "/api/v1/fleet/sso/fleetctl/token", jsonMustMarshal(t, map[string]string{
+			"code": code, "code_verifier": verifier, "redirect_uri": redirectURI,
+		}), http.StatusUnauthorized)
+
+		// Start over and exchange the code properly.
+		client = s.newSSOTestClient()
+		res, _ = confirm(client, startLogin(client), "approve", http.StatusSeeOther)
+		loc, err = url.Parse(res.Header.Get("Location"))
+		require.NoError(t, err)
+		var loginResp fleet.LoginResponse
+		res = s.DoRawNoAuth("POST", "/api/v1/fleet/sso/fleetctl/token", jsonMustMarshal(t, map[string]string{
+			"code": loc.Query().Get("code"), "code_verifier": verifier, "redirect_uri": redirectURI,
+		}), http.StatusOK)
+		require.NoError(t, json.NewDecoder(res.Body).Decode(&loginResp))
+		require.NotEmpty(t, loginResp.Token)
+		require.Equal(t, "sso_user_6_global_observer@example.com", loginResp.User.Email)
+
+		// The token is a regular session.
+		var meResp getUserResponse
+		res = s.DoRawWithHeaders("GET", "/api/latest/fleet/me", nil, http.StatusOK, map[string]string{
+			"Authorization": "Bearer " + loginResp.Token,
+		})
+		require.NoError(t, json.NewDecoder(res.Body).Decode(&meResp))
+		require.Equal(t, "sso_user_6_global_observer@example.com", meResp.User.Email)
+	})
+
+	t.Run("denied", func(t *testing.T) {
+		client := s.newSSOTestClient()
+		res, _ := confirm(client, startLogin(client), "deny", http.StatusSeeOther)
+		loc, err := url.Parse(res.Header.Get("Location"))
+		require.NoError(t, err)
+		require.Equal(t, "the-state", loc.Query().Get("state"))
+		require.Equal(t, "access_denied", loc.Query().Get("error"))
+		require.Equal(t, "denied", loc.Query().Get("error_description"))
+		require.Empty(t, loc.Query().Get("code"))
+	})
+
+	t.Run("redirect to non-loopback rejected", func(t *testing.T) {
+		client := s.newSSOTestClient()
+		s.doWithClient(client, "GET", "/api/v1/fleet/sso/fleetctl", nil, http.StatusUnprocessableEntity, nil,
+			"redirect_uri", "http://evil.example.com:4321/callback", "state", "s", "code_challenge", challenge, "code_challenge_method", "S256")
 	})
 }
 

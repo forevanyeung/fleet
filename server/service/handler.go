@@ -1323,6 +1323,14 @@ func attachFleetAPIRoutes(r *mux.Router, svc fleet.Service, config config.FleetC
 		WithRequestBodySizeLimit(fleet.MaxSSOCallbackSize).
 		POST("/api/v1/fleet/sso/callback", makeCallbackSSOEndpoint(config.Server.URLPrefix), callbackSSORequest{})
 	ne.GET("/api/v1/fleet/sso", settingsSSOEndpoint, nil)
+	// fleetctl login with SSO: the browser starts the SSO flow, and fleetctl
+	// then redeems the authorization code it was handed on its loopback URI.
+	ne.WithCustomMiddleware(ssoLimiter).
+		GET("/api/v1/fleet/sso/fleetctl", initiateFleetctlSSOEndpoint, initiateFleetctlSSORequest{})
+	ne.WithCustomMiddleware(ssoLimiter).
+		POST("/api/v1/fleet/sso/fleetctl/consent", confirmFleetctlSSOEndpoint, confirmFleetctlSSORequest{})
+	ne.WithCustomMiddleware(loginLimiter).
+		POST("/api/v1/fleet/sso/fleetctl/token", exchangeFleetctlSSOCodeEndpoint, exchangeFleetctlSSOCodeRequest{})
 
 	// the websocket distributed query results endpoint is a bit different - the
 	// provided path is a prefix, not an exact match, and it is not a go-kit

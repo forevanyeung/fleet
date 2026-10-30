@@ -1,6 +1,7 @@
 package fleetctl
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -14,6 +15,7 @@ func loginCommand() *cli.Command {
 	var (
 		flEmail    string
 		flPassword string
+		flSSO      bool
 	)
 	return &cli.Command{
 		Name:  "login",
@@ -21,13 +23,12 @@ func loginCommand() *cli.Command {
 		UsageText: `
 fleetctl login [options]
 
-Interactively prompts for email and password if not specified in the flags or environment variables.
+If SSO is enabled on the Fleet server, opens the browser to log in with SSO, then returns to
+fleetctl to finish. Use --sso=false to log in with email and password instead, for accounts that
+are not SSO-enabled.
 
-If SSO is enabled on the Fleet server, a warning will be displayed. You may still attempt to
-log in with email and password, but it will only succeed if your account is not SSO-enabled.
-
-Learn how to authenticate with fleetctl for SSO-enabled accounts:
-https://fleetdm.com/guides/fleetctl#users-with-single-sign-on-sso-or-email-two-factor-authentication-2-fa
+Otherwise, interactively prompts for email and password if not specified in the flags or
+environment variables.
 `,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -44,6 +45,11 @@ https://fleetdm.com/guides/fleetctl#users-with-single-sign-on-sso-or-email-two-f
 				Destination: &flPassword,
 				Usage:       "Password to use to log in (recommended to use interactive entry)",
 			},
+			&cli.BoolFlag{
+				Name:        "sso",
+				Destination: &flSSO,
+				Usage:       "Log in with SSO in the browser (default: true if SSO is enabled on the Fleet server and --password is not set)",
+			},
 			configFlag(),
 			contextFlag(),
 			debugFlag(),
@@ -54,7 +60,40 @@ https://fleetdm.com/guides/fleetctl#users-with-single-sign-on-sso-or-email-two-f
 				return err
 			}
 
-			if ssoSettings, ssoErr := fleet.SSOSettings(); ssoErr == nil && ssoSettings != nil && ssoSettings.SSOEnabled {
+			configPath, context := c.String("config"), c.String("context")
+
+			ssoSettings, ssoErr := fleet.SSOSettings()
+			ssoEnabled := ssoErr == nil && ssoSettings != nil && ssoSettings.SSOEnabled
+			fleetctlSSO := ssoEnabled && ssoSettings.FleetctlSSO
+
+			useSSO := fleetctlSSO && flPassword == ""
+			if c.IsSet("sso") {
+				useSSO = flSSO
+			}
+			if useSSO {
+				switch {
+				case !ssoEnabled:
+					return errors.New("SSO is not enabled on this Fleet instance. Run fleetctl login without --sso to log in with email and password.")
+				case !fleetctlSSO:
+					return fmt.Errorf("this Fleet server does not support fleetctl SSO login.\n%s", ssoAuthInstructions)
+				}
+
+				resp, err := ssoLogin(fleet, c.App.Writer, c.App.ErrWriter)
+				if err != nil {
+					return fmt.Errorf("Login failed: %w", err)
+				}
+				if err := setConfigValue(configPath, context, "email", resp.User.Email); err != nil {
+					return fmt.Errorf("error setting email for the current context: %w", err)
+				}
+				if err := setConfigValue(configPath, context, "token", resp.Token); err != nil {
+					return fmt.Errorf("error setting token for the current context: %w", err)
+				}
+				fmt.Fprintf(c.App.Writer, "[+] Fleet login successful as %s and context configured!\n", resp.User.Email)
+				return nil
+			}
+
+			// Servers that predate fleetctl SSO login only support it via API tokens.
+			if ssoEnabled && !fleetctlSSO {
 				fmt.Fprintf(os.Stderr, "Warning: %s\n\n", ssoAuthInstructions)
 			}
 
@@ -102,8 +141,6 @@ https://fleetdm.com/guides/fleetctl#users-with-single-sign-on-sso-or-email-two-f
 				fmt.Fprintf(os.Stderr, "\n%s\n", mfaAuthInstructions)
 				return fmt.Errorf("Login failed: %w", err)
 			}
-
-			configPath, context := c.String("config"), c.String("context")
 
 			if err := setConfigValue(configPath, context, "email", flEmail); err != nil {
 				return fmt.Errorf("error setting email for the current context: %w", err)

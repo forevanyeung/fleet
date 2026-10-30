@@ -121,6 +121,14 @@ type GetSSOUserFunc func(ctx context.Context, auth fleet.Auth) (*fleet.User, err
 
 type LoginSSOUserFunc func(ctx context.Context, user *fleet.User, redirectURL string) (*fleet.SSOSession, error)
 
+type InitiateFleetctlSSOFunc func(ctx context.Context, redirectURI string, state string, codeChallenge string) (sessionID string, sessionDurationSeconds int, idpURL string, err error)
+
+type FleetctlSSOCallbackFunc func(ctx context.Context, sessionID string, samlResponse []byte) (consent *fleet.FleetctlSSOConsent, redirectURL string, handled bool, err error)
+
+type ConfirmFleetctlSSOFunc func(ctx context.Context, consentID string, approve bool) (redirectURL string, err error)
+
+type ExchangeFleetctlSSOCodeFunc func(ctx context.Context, code string, codeVerifier string, redirectURI string) (*fleet.User, *fleet.Session, error)
+
 type SSOSettingsFunc func(ctx context.Context) (*fleet.SessionSSOSettings, error)
 
 type LoginFunc func(ctx context.Context, email string, password string, supportsEmailVerification bool) (user *fleet.User, session *fleet.Session, err error)
@@ -1203,6 +1211,18 @@ type Service struct {
 
 	LoginSSOUserFunc        LoginSSOUserFunc
 	LoginSSOUserFuncInvoked bool
+
+	InitiateFleetctlSSOFunc        InitiateFleetctlSSOFunc
+	InitiateFleetctlSSOFuncInvoked bool
+
+	FleetctlSSOCallbackFunc        FleetctlSSOCallbackFunc
+	FleetctlSSOCallbackFuncInvoked bool
+
+	ConfirmFleetctlSSOFunc        ConfirmFleetctlSSOFunc
+	ConfirmFleetctlSSOFuncInvoked bool
+
+	ExchangeFleetctlSSOCodeFunc        ExchangeFleetctlSSOCodeFunc
+	ExchangeFleetctlSSOCodeFuncInvoked bool
 
 	SSOSettingsFunc        SSOSettingsFunc
 	SSOSettingsFuncInvoked bool
@@ -2953,6 +2973,34 @@ func (s *Service) LoginSSOUser(ctx context.Context, user *fleet.User, redirectUR
 	s.LoginSSOUserFuncInvoked = true
 	s.mu.Unlock()
 	return s.LoginSSOUserFunc(ctx, user, redirectURL)
+}
+
+func (s *Service) InitiateFleetctlSSO(ctx context.Context, redirectURI string, state string, codeChallenge string) (sessionID string, sessionDurationSeconds int, idpURL string, err error) {
+	s.mu.Lock()
+	s.InitiateFleetctlSSOFuncInvoked = true
+	s.mu.Unlock()
+	return s.InitiateFleetctlSSOFunc(ctx, redirectURI, state, codeChallenge)
+}
+
+func (s *Service) FleetctlSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (consent *fleet.FleetctlSSOConsent, redirectURL string, handled bool, err error) {
+	s.mu.Lock()
+	s.FleetctlSSOCallbackFuncInvoked = true
+	s.mu.Unlock()
+	return s.FleetctlSSOCallbackFunc(ctx, sessionID, samlResponse)
+}
+
+func (s *Service) ConfirmFleetctlSSO(ctx context.Context, consentID string, approve bool) (redirectURL string, err error) {
+	s.mu.Lock()
+	s.ConfirmFleetctlSSOFuncInvoked = true
+	s.mu.Unlock()
+	return s.ConfirmFleetctlSSOFunc(ctx, consentID, approve)
+}
+
+func (s *Service) ExchangeFleetctlSSOCode(ctx context.Context, code string, codeVerifier string, redirectURI string) (*fleet.User, *fleet.Session, error) {
+	s.mu.Lock()
+	s.ExchangeFleetctlSSOCodeFuncInvoked = true
+	s.mu.Unlock()
+	return s.ExchangeFleetctlSSOCodeFunc(ctx, code, codeVerifier, redirectURI)
 }
 
 func (s *Service) SSOSettings(ctx context.Context) (*fleet.SessionSSOSettings, error) {

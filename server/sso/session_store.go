@@ -96,6 +96,22 @@ type SessionStore interface {
 	// ConsumeAssertion marks a verified SAML assertion as used until it expires,
 	// returning ErrAssertionAlreadyUsed if it was consumed before.
 	ConsumeAssertion(assertionID string, notOnOrAfter time.Time) error
+	// CreateFleetctlRequest records that the SSO session with the given ID was
+	// started by fleetctl login.
+	CreateFleetctlRequest(sessionID string, req FleetctlRequest, lifetimeSecs uint) error
+	// ConsumeFleetctlRequest loads and deletes the fleetctl request for the given
+	// SSO session ID. It returns nil if the session was not started by fleetctl.
+	ConsumeFleetctlRequest(sessionID string) (*FleetctlRequest, error)
+	// CreateFleetctlCode stores a single-use authorization code for fleetctl.
+	CreateFleetctlCode(code string, data FleetctlCode) error
+	// ConsumeFleetctlCode loads and deletes an authorization code, returning
+	// ErrSessionNotFound if it doesn't exist or has expired.
+	ConsumeFleetctlCode(code string) (*FleetctlCode, error)
+	// CreateFleetctlConsent stores a fleetctl login awaiting the user's approval.
+	CreateFleetctlConsent(consentID string, data FleetctlConsent) error
+	// ConsumeFleetctlConsent loads and deletes a pending fleetctl login,
+	// returning ErrSessionNotFound if it doesn't exist or has expired.
+	ConsumeFleetctlConsent(consentID string) (*FleetctlConsent, error)
 }
 
 // NewSessionStore creates a SessionStore

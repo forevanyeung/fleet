@@ -34,7 +34,17 @@ func (f *fakeSessionStore) expire(sessionID string) error {
 	return nil
 }
 
-func (f *fakeSessionStore) ConsumeAssertion(string, time.Time) error { return nil }
+func (f *fakeSessionStore) ConsumeAssertion(string, time.Time) error                  { return nil }
+func (f *fakeSessionStore) CreateFleetctlRequest(string, FleetctlRequest, uint) error { return nil }
+func (f *fakeSessionStore) ConsumeFleetctlRequest(string) (*FleetctlRequest, error)   { return nil, nil }
+func (f *fakeSessionStore) CreateFleetctlCode(string, FleetctlCode) error             { return nil }
+func (f *fakeSessionStore) ConsumeFleetctlCode(string) (*FleetctlCode, error) {
+	return nil, ErrSessionNotFound
+}
+func (f *fakeSessionStore) CreateFleetctlConsent(string, FleetctlConsent) error { return nil }
+func (f *fakeSessionStore) ConsumeFleetctlConsent(string) (*FleetctlConsent, error) {
+	return nil, ErrSessionNotFound
+}
 
 func (f *fakeSessionStore) Fullfill(sessionID string) (*Session, error) {
 	sess, err := f.get(sessionID)

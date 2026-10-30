@@ -59,6 +59,20 @@ type SessionSSOSettings struct {
 	IDPImageURL string `json:"idp_image_url"`
 	// SSOEnabled true if single sign on is enabled.
 	SSOEnabled bool `json:"sso_enabled"`
+	// FleetctlSSO is true if fleetctl can log in with SSO. It is absent on
+	// servers that predate fleetctl SSO login.
+	FleetctlSSO bool `json:"fleetctl_sso,omitempty"`
+}
+
+// FleetctlSSOConsent is a fleetctl SSO login that the user must approve.
+type FleetctlSSOConsent struct {
+	// ID identifies the pending login when the user approves or denies it. It
+	// must only be given to the user's browser.
+	ID    string
+	Email string
+	// VerificationCode is also printed by fleetctl, so the user can check that
+	// they are approving their own login.
+	VerificationCode string
 }
 
 // Session is the model object which represents what an active session is

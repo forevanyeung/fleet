@@ -136,6 +136,11 @@ func loginEndpoint(ctx context.Context, request interface{}, svc fleet.Service) 
 
 		return fleet.LoginResponse{Err: err}, nil
 	}
+	return newLoginResponse(ctx, svc, user, session), nil
+}
+
+// newLoginResponse builds the response for a successful login into a new session.
+func newLoginResponse(ctx context.Context, svc fleet.Service, user *fleet.User, session *fleet.Session) fleet.LoginResponse {
 	// Add viewer to context to allow access to service teams for list of available teams.
 	ctx = viewer.NewContext(ctx, viewer.Viewer{
 		User:    user,
@@ -146,7 +151,7 @@ func loginEndpoint(ctx context.Context, request interface{}, svc fleet.Service) 
 		if errors.Is(err, fleet.ErrMissingLicense) {
 			availableTeams = []*fleet.TeamSummary{}
 		} else {
-			return fleet.LoginResponse{Err: err}, nil
+			return fleet.LoginResponse{Err: err}
 		}
 	}
 
@@ -162,7 +167,7 @@ func loginEndpoint(ctx context.Context, request interface{}, svc fleet.Service) 
 		AvailableTeams: availableTeams,
 		Token:          session.Key,
 		TokenExpiresAt: tokenExpiresAt,
-	}, nil
+	}
 }
 
 //goland:noinspection GoErrorStringFormat
@@ -285,33 +290,7 @@ func sessionCreateEndpoint(ctx context.Context, request interface{}, svc fleet.S
 	if err != nil {
 		return fleet.LoginResponse{Err: err}, nil
 	}
-	// Add viewer to context to allow access to service teams for list of available teams.
-	ctx = viewer.NewContext(ctx, viewer.Viewer{
-		User:    user,
-		Session: session,
-	})
-	availableTeams, err := svc.ListAvailableTeamsForUser(ctx, user)
-	if err != nil {
-		if errors.Is(err, fleet.ErrMissingLicense) {
-			availableTeams = []*fleet.TeamSummary{}
-		} else {
-			return fleet.LoginResponse{Err: err}, nil
-		}
-	}
-
-	// Calculate token expiration time if session duration is configured
-	var tokenExpiresAt *time.Time
-	if sessionDuration := svc.GetSessionDuration(ctx); sessionDuration > 0 {
-		expiresAt := time.Now().Add(sessionDuration).UTC()
-		tokenExpiresAt = &expiresAt
-	}
-
-	return fleet.LoginResponse{
-		User:           user,
-		AvailableTeams: availableTeams,
-		Token:          session.Key,
-		TokenExpiresAt: tokenExpiresAt,
-	}, nil
+	return newLoginResponse(ctx, svc, user, session), nil
 }
 
 func (svc *Service) CompleteMFA(ctx context.Context, token string) (*fleet.Session, *fleet.User, error) {
@@ -655,8 +634,28 @@ func (r callbackSSOResponse) SetCookies(_ context.Context, w http.ResponseWriter
 func makeCallbackSSOEndpoint(urlPrefix string) handlerFunc {
 	return func(ctx context.Context, request interface{}, svc fleet.Service) (fleet.Errorer, error) {
 		callbackRequest := request.(*callbackSSORequest)
-		session, userID, err := getSSOSession(ctx, svc, callbackRequest)
 		var resp callbackSSOResponse
+
+		// SSO sessions started by fleetctl login hand an authorization code back
+		// to fleetctl rather than logging the browser in.
+		var (
+			session *fleet.SSOSession
+			userID  string
+			err     error
+		)
+		if consent, redirectURL, handled, fleetctlErr := svc.FleetctlSSOCallback(ctx, callbackRequest.sessionID, callbackRequest.samlResponse); handled || fleetctlErr != nil {
+			if consent != nil {
+				return newFleetctlSSOConsentPage(ctx, urlPrefix, consent)
+			}
+			session = &fleet.SSOSession{RedirectURL: redirectURL}
+			resp.Err = fleetctlErr
+			if redirectURL == "" {
+				// Couldn't tell whether fleetctl started this session.
+				session.RedirectURL = urlPrefix + "/login?status=" + string(ssoOtherError)
+			}
+		} else {
+			session, userID, err = getSSOSession(ctx, svc, callbackRequest)
+		}
 		if err != nil {
 			if err := svc.NewActivity(ctx, nil, fleet.ActivityTypeUserFailedLogin{
 				Email:    userID,
@@ -814,20 +813,28 @@ func (svc *Service) GetSSOUser(ctx context.Context, auth fleet.Auth) (*fleet.Use
 	return user, nil
 }
 
-func (svc *Service) LoginSSOUser(ctx context.Context, user *fleet.User, redirectURL string) (*fleet.SSOSession, error) {
+// ssoUserCanLogin checks that the user found for an SSO assertion may log in.
+func ssoUserCanLogin(ctx context.Context, user *fleet.User) error {
 	logging.WithExtras(ctx, "email", user.Email)
 
 	// if the user is not sso enabled they are not authorized
 	if !user.SSOEnabled {
 		err := ctxerr.New(ctx, "user not configured to use sso")
-		return nil, ctxerr.Wrap(ctx, newSSOError(err, ssoAccountDisabled))
+		return ctxerr.Wrap(ctx, newSSOError(err, ssoAccountDisabled))
 	}
 
 	// Do not allow login if on Fleet Free and the user has a Premium-only role.
 	if !license.IsPremium(ctx) {
 		if fleet.PremiumRolesPresent(user.GlobalRole, user.Teams) {
-			return nil, fleet.ErrMissingLicense
+			return fleet.ErrMissingLicense
 		}
+	}
+	return nil
+}
+
+func (svc *Service) LoginSSOUser(ctx context.Context, user *fleet.User, redirectURL string) (*fleet.SSOSession, error) {
+	if err := ssoUserCanLogin(ctx, user); err != nil {
+		return nil, err
 	}
 
 	session, err := svc.makeSession(ctx, user.ID)
@@ -894,6 +901,8 @@ func (svc *Service) SSOSettings(ctx context.Context) (*fleet.SessionSSOSettings,
 		IDPName:     ssoSettings.IDPName,
 		IDPImageURL: ssoSettings.IDPImageURL,
 		SSOEnabled:  ssoSettings.EnableSSO,
+		// Lets fleetctl know it can log in with SSO instead of a password.
+		FleetctlSSO: ssoSettings.EnableSSO,
 	}
 	return settings, nil
 }
